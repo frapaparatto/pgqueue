@@ -1,0 +1,7 @@
+# Personal notes directory
+docs/personal
+docs/agents
+.claude
+CLAUDE.md
+example.go
+.env
