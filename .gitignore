@@ -3,5 +3,5 @@ docs/personal
 docs/agents
 .claude
 CLAUDE.md
-example.go
 .env
+run_test
