@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/frapaparatto/pgqueue/migrations"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -45,7 +46,7 @@ func run(m *testing.M) int {
 		fmt.Fprintf(os.Stderr, "unable to connect to database: %v\n", err)
 		return 1
 	}
-	defer conn.Close(ctx)
+	defer conn.Close(ctx) //nolint:errcheck // releases the socket only, every write has already completed
 
 	// Clean state: remove everything a previous run left behind.
 	if _, err := conn.Exec(ctx, "DROP SCHEMA IF EXISTS pgqueue CASCADE"); err != nil {
@@ -53,16 +54,31 @@ func run(m *testing.M) int {
 		return 1
 	}
 
-	// TODO (next session):
-	// 1. create migrations/001_create_jobs_table.sql
-	// 2. embed it and apply the files here, in name order
-	// 3. keep conn in a package-level variable, for the per-test helper
+	entries, err := migrations.Files.ReadDir(".")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "unable to list migrations: %v\n", err)
+		return 1
+	}
+
+	for _, entry := range entries {
+		content, err := migrations.Files.ReadFile(entry.Name())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "unable to read migration %s: %v\n", entry.Name(), err)
+			return 1
+		}
+
+		if _, err := conn.Exec(ctx, string(content)); err != nil {
+			fmt.Fprintf(os.Stderr, "unable to apply migration %s: %v\n", entry.Name(), err)
+			return 1
+		}
+	}
 	return m.Run()
 }
 
 func TestJobTableExists(t *testing.T) {
 	t.Run("Test job table exists", func(t *testing.T) {
 		exists, err := tableExists(ctx, conn, "pgqueue.jobs")
+
 		if err != nil {
 			t.Fatalf("tableExists(%q) failed: %v", "pgqueue.jobs", err)
 		}
@@ -70,6 +86,41 @@ func TestJobTableExists(t *testing.T) {
 			t.Errorf("table %q does not exist", "pgqueue.jobs")
 		}
 	})
+}
+
+func TestResetJobs(t *testing.T) {
+	resetJobs(t)
+
+	if _, err := conn.Exec(ctx, "INSERT INTO pgqueue.jobs (kind, max_attempts) VALUES ('test', 1)"); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+
+	resetJobs(t)
+
+	var count int
+	if err := conn.QueryRow(ctx, "SELECT count(*) FROM pgqueue.jobs").Scan(&count); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("jobs count = %d, want 0", count)
+	}
+
+	var id int64
+	if err := conn.QueryRow(ctx, "INSERT INTO pgqueue.jobs (kind, max_attempts) VALUES ('test', 1) RETURNING id").Scan(&id); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	if id != 1 {
+		t.Errorf("id of the first job after reset = %d, want 1", id)
+	}
+}
+
+// resetJobs empties pgqueue.jobs and restarts its identity, so the calling
+// test starts from a clean state regardless of what ran before it.
+func resetJobs(t *testing.T) {
+	t.Helper()
+	if _, err := conn.Exec(ctx, "TRUNCATE pgqueue.jobs RESTART IDENTITY"); err != nil {
+		t.Fatalf("reset jobs: %v", err)
+	}
 }
 
 // tableExists reports whether the named table exists. It uses to_regclass,
